@@ -6,6 +6,7 @@ from smbprotocol.create_contexts import CreateContextName
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
+from tqdm import tqdm
 import getpass
 import shutil
 import os
@@ -36,7 +37,7 @@ while True:
         print("Error: Incorrect username or password. Please try again.")
         # Prompt for username and password again if the connection fails
         username = input("Enter your username here: ")
-        password = input("Enter your password here: ")
+        password = getpass.getpass("Enter your password here: ")
 
 # Access shared folder
 try:
@@ -47,29 +48,45 @@ except Exception as e:
     print("Error: Unable to access the shared folder. Exiting.")
     exit()  # Stop execution
 
-# Define the date range
-start_date = datetime(2014, 1, 1)  # Start date
-end_date = datetime.now().date()  # End date
+# Thread count choice, with default of 4
+num_threads = int(input("Enter the number of threads to use (default is 4): ") or 4)
 
-# Ensure the directory exists
-results_dir = "/Users/samfidler/Desktop/Lab Project/Results"
+# Determine chunk size, default is 16KB, decrease if memory or wifi issues
+chunk_size = int(input("Enter the chunk size in KB (default is 16, decrease if issues): ") or 16) * 1024  # Convert to bytes
+
+# Define the date range
+start_date = datetime(2014, 1, 1)  # Start date, earliest Lynch Lab file
+end_date = datetime.now().date()  # End date, to current day to catch all files
+
+# Set the directory path for new files !!!(need to make flexible before publish)!!!
+# Make temporary folder in folder with other .exe?
+results_dir = "/Users/samfidler/Desktop/Lab Project/LynchLab/Results"
 
 # Clear the directory by deleting it and recreating it
 if os.path.exists(results_dir):
     shutil.rmtree(results_dir)  # Delete the directory and all its contents
 os.makedirs(results_dir, exist_ok=True)  # Recreate the directory
 
-# Variables for which files in the Data Backup folder to be combined
-room = ['G126', 'G138', 'G140'] #add more rooms as needed
-box = ['1-16', '1B-16B', '1-16', '1B-16B', '1-16', '1B-14B'] #if more boxes are added, add "1-16, 1B-16B"
+# Room and Box lists to catch all files
+room = ['G126', 'G138', 'G140'] # add more rooms as needed if lab expands
+box = ['1-16', '1B-16B', '1-16', '1B-16B', '1-16', '1B-14B'] # if more rooms are added, add "1-16, 1B-16B" to end of list
 
-# Loop through each date in the range
+# Initialize current_date to the begininning
 current_date = start_date.date()
 
-# Lock for thread-safe index management
+# Lock for thread-safe index management (???)
 index_lock = Lock()
 
-# Shared indices
+# Define the total number of files to process for progress bar
+total_files = len(room) * len(box) * ((end_date - start_date.date()).days + 1)
+
+# Create a shared progress bar for all threads
+progress_bar = tqdm(total=total_files, desc="Processing Files", position=0, leave=True)
+
+# Lock for thread-safe progress bar updates (???)
+progress_lock = Lock()
+
+# Shared indices to find correct box/room
 roomIndex = 0
 boxIndex = 0
 
@@ -98,7 +115,7 @@ def process_box(start_date, end_date, results_dir, tree):
         # Reset the current date to the start date for each box
         current_date = start_date.date()
 
-        # Define the output file path for the combined data
+        # Define the output file path for the combined data, named in "room_box" format
         combined_file_path = os.path.join(results_dir, f"{room[current_room]}_{box[current_box]}.txt")
 
         # Open the combined file in write-binary mode
@@ -111,8 +128,6 @@ def process_box(start_date, end_date, results_dir, tree):
                 file_path = f"WLynch_Labs/Data Backup/{room[current_room]}/{box[current_box]}/{year}/!{date_str}"
 
                 try:
-                    print(f"Processing file: {room[current_room]} {box[current_box]} !{date_str}.")
-
                     # Open the file on the SMB share
                     file = Open(tree, file_path)
                     file.create(
@@ -124,10 +139,9 @@ def process_box(start_date, end_date, results_dir, tree):
                         create_options=0
                     )
 
-                    # Read file content in chunks
+                    # Read file content in chunks of 1 KB
                     data = b""
                     offset = 0
-                    chunk_size = 1028  # 1 KB
                     while True:
                         try:
                             chunk = file.read(offset, chunk_size)
@@ -136,35 +150,30 @@ def process_box(start_date, end_date, results_dir, tree):
                             data += chunk
                             offset += len(chunk)
                         except Exception:
-                            break  # Exit the loop if an error occurs during reading
+                            break  # Exit the loop if an error occurs during reading, typically end of file error
 
                     file.close()
 
                     # Check if the file is empty
                     if not data:
-                        print(f"File {file_path} is empty. Skipping.")
                         current_date += timedelta(days=1)
                         continue
 
                     # Append the content to the combined file
-                    print("File Found! Adding data.")
                     combined_file.write(data)
 
                 except Exception:
-                    print(f"Error processing file: {file_path}. Skipping.")
+                    # Handle exceptions (e.g., file not found)
                     current_date += timedelta(days=1)
-                    continue  # Ignore errors and continue
+                    continue  # Skip to the next iteration
 
-                # Move to the next date
-                current_date += timedelta(days=1)
+                finally:
+                    # Update the progress bar
+                    with progress_lock:
+                        progress_bar.update(1)
 
-        print(f"End of box {box[current_box]}")
-        if current_box % 2 == 1:
-            print(f"End of room {room[current_room]}")
 
-# Multithreaded processing
-num_threads = input("Enter the number of threads to use (default is 4): ")
-
+# no idea how this works, if it ever breaks the script won't function
 with ThreadPoolExecutor(max_workers=num_threads) as executor:  # Adjust max_workers based on num_threads
     futures = [executor.submit(process_box, start_date, end_date, results_dir, tree) for _ in range(num_threads)]
 
@@ -175,8 +184,8 @@ with ThreadPoolExecutor(max_workers=num_threads) as executor:  # Adjust max_work
 # Final message
 print("Processing complete.")
 
-# Play an alert sound
-os.system('say "Processing complete"')
+# Play an alert sound (don't think this is working)
+os.system('afplay /System/Library/Sounds/Glass.aiff')
 
 # Close the SMB session in the correct order
 try:
