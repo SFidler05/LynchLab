@@ -3,9 +3,12 @@ from smbprotocol.session import Session
 from smbprotocol.tree import TreeConnect
 from smbprotocol.open import Open, FilePipePrinterAccessMask
 from smbprotocol.create_contexts import CreateContextName
+from smbprotocol.file_info import FileAttributes
+from smbprotocol.file_info import FileInformationClass
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
+from tqdm import tqdm
 import getpass
 import shutil
 import os
@@ -36,7 +39,7 @@ while True:
         print("Error: Incorrect username or password. Please try again.")
         # Prompt for username and password again if the connection fails
         username = input("Enter your username here: ")
-        password = input("Enter your password here: ")
+        password = getpass.getpass("Enter your password here: ")
 
 # Access shared folder
 try:
@@ -45,14 +48,28 @@ try:
     print("Shared folder accessed successfully!")
 except Exception as e:
     print("Error: Unable to access the shared folder. Exiting.")
-    exit()  # Stop execution
+    exit()  # Stop execution]
+
+# Multithreaded processing
+num_threads = int(input("Enter the number of threads to use (default is 4): ") or 4)
+
+# Input for chunk size in KB
+chunk_size = int(input("Enter the chunk size in KB (default is 16: ") or 16) * 1024  # Convert KB to bytes
+#Ensure chunk size is at least 1 KB
+if chunk_size < 1024:
+    print("Chunk size must be at least 1 KB. Setting to 1 KB.")
+    chunk_size = 1024  # Set to 1 KB
+# Ensure chunk size is not more than 1 MB
+if chunk_size > 1024 * 1024:
+    print("Chunk size must not exceed 16 MB. Setting to 16 MB.")
+    chunk_size = 16 * 1024 * 1024  # Set to 1 MB
 
 # Define the date range
 start_date = datetime(2014, 1, 1)  # Start date
 end_date = datetime.now().date()  # End date
 
 # Ensure the directory exists
-results_dir = "/Users/samfidler/Desktop/Lab Project/Results"
+results_dir = "/Users/samfidler/Desktop/Lab Project/LynchLab/Results"
 
 # Clear the directory by deleting it and recreating it
 if os.path.exists(results_dir):
@@ -73,12 +90,37 @@ index_lock = Lock()
 roomIndex = 0
 boxIndex = 0
 
+def get_local_folder_size(folder_path):
+    total_size = 0
+    for dirpath, _, filenames in os.walk(folder_path):
+        for filename in filenames:
+            file_path = os.path.join(dirpath, filename)
+            total_size += os.path.getsize(file_path)
+    return total_size
+
+folder_size_bytes = 1610612736 
+folder_size_mb = folder_size_bytes * (1024 * 1024)  # Convert bytes to MB
+print(f"Folder size: {folder_size_mb:.2f} MB")
+
+# Input for the target folder size in MB
+target_size_mb = folder_size_mb
+target_size_bytes = target_size_mb  # Convert MB to bytes
+
+# Initialize a variable to track the cumulative size of processed files
+cumulative_size = 0
+
+# Create a progress bar based on the target size
+progress_bar = tqdm(total=target_size_bytes, desc="Processing Files", unit="B", unit_scale=True, position=0, leave=True)
+
+# Lock for thread-safe progress bar updates
+progress_lock = Lock()
+
 def process_box(start_date, end_date, results_dir, tree):
     """
     Function to process a single box for a given room.
     Dynamically updates roomIndex and boxIndex.
     """
-    global roomIndex, boxIndex
+    global roomIndex, boxIndex, cumulative_size
 
     while True:
         # Safely get the current indices and update them
@@ -111,8 +153,6 @@ def process_box(start_date, end_date, results_dir, tree):
                 file_path = f"WLynch_Labs/Data Backup/{room[current_room]}/{box[current_box]}/{year}/!{date_str}"
 
                 try:
-                    print(f"Processing file: {room[current_room]} {box[current_box]} !{date_str}.")
-
                     # Open the file on the SMB share
                     file = Open(tree, file_path)
                     file.create(
@@ -127,7 +167,6 @@ def process_box(start_date, end_date, results_dir, tree):
                     # Read file content in chunks
                     data = b""
                     offset = 0
-                    chunk_size = 1028  # 1 KB
                     while True:
                         try:
                             chunk = file.read(offset, chunk_size)
@@ -142,28 +181,23 @@ def process_box(start_date, end_date, results_dir, tree):
 
                     # Check if the file is empty
                     if not data:
-                        print(f"File {file_path} is empty. Skipping.")
                         current_date += timedelta(days=1)
                         continue
 
                     # Append the content to the combined file
-                    print("File Found! Adding data.")
                     combined_file.write(data)
 
+                    # Update the cumulative size and progress bar
+                    with progress_lock:
+                        cumulative_size += len(data)
+                        progress_bar.update(len(data))
+
                 except Exception:
-                    print(f"Error processing file: {file_path}. Skipping.")
                     current_date += timedelta(days=1)
                     continue  # Ignore errors and continue
 
                 # Move to the next date
                 current_date += timedelta(days=1)
-
-        print(f"End of box {box[current_box]}")
-        if current_box % 2 == 1:
-            print(f"End of room {room[current_room]}")
-
-# Multithreaded processing
-num_threads = input("Enter the number of threads to use (default is 4): ")
 
 with ThreadPoolExecutor(max_workers=num_threads) as executor:  # Adjust max_workers based on num_threads
     futures = [executor.submit(process_box, start_date, end_date, results_dir, tree) for _ in range(num_threads)]
@@ -172,11 +206,14 @@ with ThreadPoolExecutor(max_workers=num_threads) as executor:  # Adjust max_work
     for future in as_completed(futures):
         future.result()
 
+# Close the progress bar
+progress_bar.close()
+
 # Final message
 print("Processing complete.")
 
 # Play an alert sound
-os.system('say "Processing complete"')
+os.system('afplay /System/Library/Sounds/Glass.aiff')  # Replace with your desired sound file
 
 # Close the SMB session in the correct order
 try:
