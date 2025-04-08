@@ -240,6 +240,11 @@ with ThreadPoolExecutor(max_workers=num_threads) as executor:  # Adjust max_work
     for future in as_completed(futures):
         future.result()
 
+# Articially complete progress bar to 100%
+progress_bar.n = progress_bar.total
+progress_bar.last_print_n = progress_bar.total
+progress_bar.refresh()  # Refresh the progress bar to show completion
+
 # Close the progress bar
 progress_bar.close()
 
