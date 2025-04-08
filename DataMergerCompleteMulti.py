@@ -33,7 +33,7 @@ while True:
         conn.connect()
         session = Session(conn, username, password)
         session.connect()
-        print("Connection successful!")
+        print("Connection to server successful!")
         break  # Exit the loop if the connection is successful
     except Exception:
         print("Error: Incorrect username or password. Please try again.")
@@ -54,7 +54,7 @@ except Exception as e:
 num_threads = int(input("Enter the number of threads to use (default is 4): ") or 4)
 
 # Input for chunk size in KB
-chunk_size = int(input("Enter the chunk size in KB (default is 16: ") or 16) * 1024  # Convert KB to bytes
+chunk_size = int(input("Enter the chunk size in KB (default is 16): ") or 16) * 1024  # Convert KB to bytes
 #Ensure chunk size is at least 1 KB
 if chunk_size < 1024:
     print("Chunk size must be at least 1 KB. Setting to 1 KB.")
@@ -69,7 +69,8 @@ start_date = datetime(2014, 1, 1)  # Start date
 end_date = datetime.now().date()  # End date
 
 # Ensure the directory exists
-results_dir = "/Users/samfidler/Desktop/Lab Project/LynchLab/Results"
+script_dir = os.path.dirname(os.path.abspath(__file__))  # Get the directory of the script
+results_dir = os.path.join(script_dir, "Data")  # Create a folder named "Data" in the script's directory
 
 # Clear the directory by deleting it and recreating it
 if os.path.exists(results_dir):
@@ -90,21 +91,54 @@ index_lock = Lock()
 roomIndex = 0
 boxIndex = 0
 
-def get_local_folder_size(folder_path):
+def get_smb_folder_size(tree, folder_path):
+    """
+    Calculate the total size of files in a folder on an SMB server.
+    """
     total_size = 0
-    for dirpath, _, filenames in os.walk(folder_path):
-        for filename in filenames:
-            file_path = os.path.join(dirpath, filename)
-            total_size += os.path.getsize(file_path)
+    try:
+        # Open the folder on the SMB share
+        folder = Open(tree, folder_path)
+        folder.create(
+            desired_access=FilePipePrinterAccessMask.GENERIC_READ,  # Use GENERIC_READ for directory access
+            impersonation_level=0,
+            file_attributes=0,
+            share_access=1,
+            create_disposition=1,
+            create_options=0
+        )
+
+        # List the contents of the folder
+        entries = folder.query_directory(
+            pattern= "*",  # Wildcard pattern to match all files and directories
+            file_information_class=FileInformationClass.FILE_DIRECTORY_INFORMATION
+        )
+
+        for entry in entries:
+            # Decode the filename properly
+            filename = entry['file_name'].get_value().decode('utf-16-le').strip()
+            if filename not in [".", ".."]:  # Skip current and parent directory entries
+                full_path = f"{folder_path}/{filename}"
+                if entry['file_attributes'].get_value() & FileAttributes.FILE_ATTRIBUTE_DIRECTORY:
+                    # Recursively calculate size for subdirectories
+                    total_size += get_smb_folder_size(tree, full_path)
+                else:
+                    # Add the size of the file
+                    file_size = entry['end_of_file'].get_value()
+                    total_size += file_size
+
+        folder.close()
+    except Exception as e:
+        print(f"Error accessing folder {folder_path}: {e}")
     return total_size
 
-folder_size_bytes = 1610612736 
-folder_size_mb = folder_size_bytes * (1024 * 1024)  # Convert bytes to MB
-print(f"Folder size: {folder_size_mb:.2f} MB")
+folder_path = "WLynch_Labs/Data Backup"  # Path to the folder on the SMB server
+folder_size_bytes = get_smb_folder_size(tree, folder_path)  # Pass the tree object and folder path
+folder_size_mb = folder_size_bytes / (1024 * 1024)  # Convert bytes to MB
 
 # Input for the target folder size in MB
 target_size_mb = folder_size_mb
-target_size_bytes = target_size_mb  # Convert MB to bytes
+target_size_bytes = target_size_mb * 1024 * 1024  # Convert MB to bytes
 
 # Initialize a variable to track the cumulative size of processed files
 cumulative_size = 0
