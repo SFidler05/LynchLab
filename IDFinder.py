@@ -1,31 +1,63 @@
 import os
 from openpyxl import Workbook  # Import openpyxl for Excel file creation
+from datetime import datetime  # Import for date parsing
+from openpyxl.styles import NamedStyle
+from openpyxl.utils import get_column_letter
+from tqdm import tqdm  # Import tqdm for the progress bar
+import shutil  # Import for folder deletion
+from concurrent.futures import ThreadPoolExecutor, as_completed # Import for multithreading
 
 # Dynamically determine the folder path for "Data"
 script_dir = os.path.dirname(os.path.abspath(__file__))  # Get the directory of the script
 folder_path = os.path.join(script_dir, "Data")  # Path to the "Data" folder
 
-# Input file path containing the list of animal IDs
-id_file_path = input("Enter the file path containing the list of IDs: ").strip().strip("'").strip('"')
+# Ask the user for the output folder name
+output_folder_name = str(input("Enter the name of the output folder (will replace duplicates): ") or "Results").strip()
+output_folder_path = os.path.join(script_dir, output_folder_name)
 
-# Debugging: Print the file path
-print(f"Debug: Checking file path '{id_file_path}'")
+# Path to the unfound IDs file
+unfound_ids_file_path = os.path.join(script_dir, "Unfound_IDs.txt") # Path to the unfound IDs file
 
-# Read the IDs from the file
+# Check if the folder already exists and delete it if necessary
+if os.path.exists(output_folder_path):
+    try:
+        shutil.rmtree(output_folder_path)
+        print(f"Existing folder '{output_folder_path}' deleted.")
+    except PermissionError:
+        print(f"Error: Unable to delete the existing folder '{output_folder_path}'. Please close any open files and try again.")
+        exit(1)
+
+# Create the new output folder
+os.makedirs(output_folder_path, exist_ok=True)
+print(f"Output folder '{output_folder_path}' created.")
+
+# Input file containing the list of animal ID file paths
+id_file_list_path = os.path.join(script_dir, "ID List.txt")  # Path to the file containing ID file paths
+
+# Read the IDs from "ID List.txt" and assign them to ID_list
+ID_list = []
 try:
-    with open(id_file_path, 'r', encoding='utf-8') as id_file:
-        ID_list = [line.strip() for line in id_file.readlines()]  # Read and strip each line
+    with open(id_file_list_path, 'r', encoding='utf-8') as id_file_list:
+        ID_list = [line.strip() for line in id_file_list.readlines()]  # Read and strip each line
 except FileNotFoundError:
-    print("Error: The specified file was not found.")
-    ID_list = []
+    print(f"Error: The file '{id_file_list_path}' was not found.")
+    exit(1)
 except PermissionError:
-    print("Error: Permission denied for the specified file.")
-    ID_list = []
+    print(f"Error: Permission denied for the file '{id_file_list_path}'.")
+    exit(1)
+
+
+valid_file_processed = True  # Flag to track if any valid files were processed
+# Check if any IDs were loaded
+if not ID_list:
+    valid_file_processed = False  # No valid files were processed
+    print("Error: No IDs were found in 'ID List.txt'.")
+    exit(1)
 
 def search_string_in_files_with_context(folder_path, search_string):
     """
     Search for a given string in all files within a folder and copy lines from two lines above the match
-    until three consecutive empty lines are encountered.
+    until one empty line is encountered.
 
     Args:
         folder_path (str): Path to the folder to search in.
@@ -49,7 +81,6 @@ def search_string_in_files_with_context(folder_path, search_string):
                             # Start copying from two lines above the match
                             start_index = max(0, i - 2)
                             context = []
-                            empty_line_count = 0
 
                             for j in range(start_index, len(lines)):
                                 current_line = lines[j].strip()
@@ -59,12 +90,7 @@ def search_string_in_files_with_context(folder_path, search_string):
                                     context.append(current_line)
 
                                 # Check for consecutive empty lines
-                                if current_line == "":
-                                    empty_line_count += 1
-                                else:
-                                    empty_line_count = 0
-
-                                if empty_line_count == 3:  # Stop after three consecutive empty lines
+                                if current_line == "":  # Stop after an empty line
                                     break
 
                             if file_path not in results:
@@ -77,54 +103,127 @@ def search_string_in_files_with_context(folder_path, search_string):
 
     return results
 
+def process_id(search_string):
+    """
+    Process a single ID: search for the ID in files, extract context, and save to an Excel file.
+    """
+    result = search_string_in_files_with_context(folder_path, search_string.strip("'"))
+    if result:
+        for file, contexts in result.items():
+            # Create a new workbook for each file
+            file_name = f"{search_string}_{os.path.splitext(os.path.basename(file))[0]}.xlsx"
+            output_file_path = os.path.join(output_folder_path, file_name)
 
-if __name__ == "__main__":
-    if not ID_list:
-        print("No IDs found in the specified file.")
-    else:
-        # Create a new Excel workbook
-        workbook = Workbook()
-        workbook.remove(workbook.active)  # Remove the default sheet
+            try:
+                # Each thread creates its own Workbook object
+                workbook = Workbook()
+                sheet = workbook.active
+                sheet.title = "Data"
 
-        for search_string in ID_list:
-            print(f"\nSearching for ID: {search_string}")
-            result = search_string_in_files_with_context(folder_path, search_string)
+                for context in contexts:
+                    for line_index, line in enumerate(context):
+                        # Split the line into columns by spaces
+                        columns = line.split()
 
-            if result:
-                # Create a new sheet for the current ID
-                sheet = workbook.create_sheet(title=search_string[:31])  # Excel sheet names are limited to 31 characters
-
-                for file, contexts in result.items():
-                    for context in contexts:
-                        for line in context:
-                            # Split the line by spaces
-                            columns = line.split()  # Split the line into columns by spaces
-
-                            # Convert numeric strings to numbers
+                        # Handle the first two lines as dates
+                        if line_index < 2:
+                            try:
+                                date_formats = ["%m/%d/%y", "%d-%m-%Y"]
+                                date = None
+                                for fmt in date_formats:
+                                    try:
+                                        date = datetime.strptime(columns[2], fmt)
+                                        break
+                                    except ValueError:
+                                        continue
+                                if date:
+                                    columns[2] = date.strftime("%m/%d/%Y")
+                            except (IndexError, ValueError):
+                                pass
+                        else:
+                            # Convert all numeric strings to numbers for subsequent lines
                             for i in range(len(columns)):
-                                if columns[i].isdigit():  # Check if the value is numeric
-                                    columns[i] = int(columns[i])  # Convert to an integer
+                                if isinstance(columns[i], str) and columns[i].isdigit():
+                                    columns[i] = int(columns[i])
                                 else:
                                     try:
-                                        columns[i] = float(columns[i])  # Attempt to convert to a float
+                                        columns[i] = float(columns[i])
                                     except ValueError:
-                                        pass  # Leave as a string if conversion fails
+                                        pass
 
-                            # Append the processed row to the sheet
-                            sheet.append(columns)
-            else:
-                print(f"The ID {search_string} was not found in any files.")
+                        # Write the processed row (columns) to the Excel sheet
+                        sheet.append(columns)
 
-        # Save the workbook to a file
-        results_file_path = os.path.join(script_dir, "Results.xlsx")
-        workbook.save(results_file_path)
-        print(f"Results saved to {results_file_path}")
-        
-# Need to Add:
-# Flexibility to add more lines of interest
-# Check for B boxes, (if list contains check for boxes, check if file contained is B or A boxes)
-# Some other sort of output, possible CSV or Excel File? worst case just a text file
-# Need to add the ability to input a list of IDs and scan through each one
-# Need to change box / date ouput to 
-    # Box should only have one output unless it is changed, in which case it should list all changes
-    # Date should be the first and last date assosciated with the ID
+                # Adjust column widths to fit the content
+                for column_cells in sheet.columns:
+                    max_length = 0
+                    column_letter = get_column_letter(column_cells[0].column)
+                    for cell in column_cells:
+                        try:
+                            if cell.value:
+                                max_length = max(max_length, len(str(cell.value)))
+                        except:
+                            pass
+                    adjusted_width = max_length + 2
+                    sheet.column_dimensions[column_letter].width = adjusted_width
+
+                # Save the workbook
+                workbook.save(output_file_path)
+            except Exception as e:
+                print(f"Error writing to file '{output_file_path}': {e}")
+    else:
+        print(f"The ID {search_string} was not found in any files.")
+        return search_string  # Return unfound ID for tracking
+
+    return None  # Return None if the ID was processed successfully
+
+
+if __name__ == "__main__":
+    if not valid_file_processed:
+        print("No valid IDs found in the specified files.")
+    elif not ID_list:
+        print("No IDs were found in the valid files provided.")
+    else:
+        unfound_ids = []  # List to track IDs that were not found
+
+        # Use ThreadPoolExecutor for multithreading
+        with ThreadPoolExecutor() as executor:
+            futures = {executor.submit(process_id, search_string): search_string for search_string in ID_list}
+
+            # Use tqdm to track progress
+            with tqdm(total=len(ID_list), desc="Processing IDs", unit="ID") as pbar:
+                for future in as_completed(futures):
+                    search_string = futures[future]
+                    try:
+                        result = future.result()
+                        if result:  # If the ID was not found
+                            unfound_ids.append(result)
+                    except Exception as e:
+                        print(f"Error processing ID '{search_string}': {e}")
+                    finally:
+                        pbar.update(1)
+
+# Check if the unfound IDs file already exists and delete it if necessary
+if os.path.exists(unfound_ids_file_path):
+    try:
+        shutil.rmtree(unfound_ids_file_path)
+        print(f"Existing file '{unfound_ids_file_path}' deleted.")
+    except PermissionError:
+        print(f"Error: Unable to delete the existing file '{unfound_ids_file_path}'. Please close any open files and try again.")
+        exit(1)
+    os.makedirs(unfound_ids_file_path, exist_ok=True)
+    print(f"Output file '{unfound_ids_file_path}' created.")
+
+# Save the list of unfound IDs to a .txt file
+try:
+    with open(unfound_ids_file_path, 'w', encoding='utf-8') as unfound_file:
+        if unfound_ids:
+            unfound_file.write("The following IDs were not found:\n")
+            for unfound_id in unfound_ids:
+                unfound_file.write(f"{unfound_id}\n")
+            # Write the unfound IDs to the file
+            print(f"\nUnfound IDs have been saved to '{unfound_ids_file_path}'.")
+        else:
+            unfound_file.write("All IDs were found in the files.")
+except Exception as e:
+    print(f"Error writing to 'Unfound_IDs.txt': {e}")
