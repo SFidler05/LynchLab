@@ -2,7 +2,6 @@ from smbprotocol.connection import Connection
 from smbprotocol.session import Session
 from smbprotocol.tree import TreeConnect
 from smbprotocol.open import Open, FilePipePrinterAccessMask
-from smbprotocol.create_contexts import CreateContextName
 from smbprotocol.file_info import FileAttributes
 from smbprotocol.file_info import FileInformationClass
 from datetime import datetime, timedelta
@@ -13,6 +12,7 @@ import getpass
 import shutil
 import os
 import uuid
+import re  # Import for regex to match folder names
 
 # Define server and credentials
 server = "topaz.storage.virginia.edu"
@@ -50,19 +50,11 @@ except Exception as e:
     print("Error: Unable to access the shared folder. Exiting.")
     exit()  # Stop execution]
 
-# Multithreaded processing
-num_threads = int(input("Enter the number of threads to use (default is 4): ") or 4)
+# Automatically determine the number of threads based on CPU cores
+num_threads = os.cpu_count()
 
 # Input for chunk size in KB
-chunk_size = int(input("Enter the chunk size in KB (default is 16): ") or 16) * 1024  # Convert KB to bytes
-#Ensure chunk size is at least 1 KB
-if chunk_size < 1024:
-    print("Chunk size must be at least 1 KB. Setting to 1 KB.")
-    chunk_size = 1024  # Set to 1 KB
-# Ensure chunk size is not more than 1 MB
-if chunk_size > 1024 * 1024:
-    print("Chunk size must not exceed 16 MB. Setting to 16 MB.")
-    chunk_size = 16 * 1024 * 1024  # Set to 1 MB
+chunk_size = 32 * 1024  # Convert KB to bytes
 
 # Define the date range
 start_date = datetime(2014, 1, 1)  # Start date
@@ -70,12 +62,22 @@ end_date = datetime.now().date()  # End date
 
 # Ensure the directory exists
 script_dir = os.path.dirname(os.path.abspath(__file__))  # Get the directory of the script
-results_dir = os.path.join(script_dir, "Data")  # Create a folder named "Data" in the script's directory
 
-# Clear the directory by deleting it and recreating it
-if os.path.exists(results_dir):
-    shutil.rmtree(results_dir)  # Delete the directory and all its contents
-os.makedirs(results_dir, exist_ok=True)  # Recreate the directory
+# Dynamically name the results directory based on the current date
+current_date_str = datetime.now().strftime("%Y-%m-%d")  # Format: YYYY-MM-DD
+results_dir = os.path.join(script_dir, f"Data_{current_date_str}")
+
+# Delete all folders matching the pattern "Data_{any date}"
+for folder_name in os.listdir(script_dir):
+    if re.match(r"Data_\d{4}-\d{2}-\d{2}", folder_name):  # Match folders like "Data_YYYY-MM-DD"
+        folder_path = os.path.join(script_dir, folder_name)
+        if os.path.isdir(folder_path):
+            shutil.rmtree(folder_path)  # Delete the folder
+            print(f"Deleted old folder: {folder_path}")
+
+# Create the new results directory
+os.makedirs(results_dir, exist_ok=True)
+print(f"Output folder '{results_dir}' created.")
 
 # Variables for which files in the Data Backup folder to be combined
 room = ['G126', 'G138', 'G140'] #add more rooms as needed
